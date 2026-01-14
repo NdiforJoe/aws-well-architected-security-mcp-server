@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "mcp-security-server-prod"
+resolve_s3 = true
+s3_prefix = "mcp-security-server-prod"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+parameter_overrides = "Environment=\"prod\" NotificationEmail=\"joewebacc@gmail.com\" EnableBedrock=\"true\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

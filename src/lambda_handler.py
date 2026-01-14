@@ -2,7 +2,7 @@
 Lambda handler wrapper for FastAPI MCP server
 """
 from mangum import Mangum
-from main import app
+import main
 
 # Mangum adapter converts FastAPI to Lambda-compatible format
-handler = Mangum(app, lifespan="off")
+handler = Mangum(main.app, lifespan="off")
