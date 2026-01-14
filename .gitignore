@@ -208,4 +208,17 @@ __marimo__/
 venv/
 __pycache__/
 *.pyc
-.aws/
+.aws/.aws-sam/
+sam-installation/
+aws-sam-cli-linux-x86_64.zip*
+template/
+
+# SAM build artifacts
+.aws-sam/
+sam-installation/
+
+# SAM installer downloads
+aws-sam-cli-linux-x86_64.zip*
+
+# Template directory
+template/

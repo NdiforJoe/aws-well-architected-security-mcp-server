@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: AWS Well-Architected Security MCP Server - Lambda + API Gateway
 
 Parameters:
@@ -6,9 +7,10 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, prod]
+    Description: Deployment environment (dev/prod)
 
 Resources:
-  # IAM Role - Least Privilege (read-only for security services)
+  # Least-Privilege IAM Role (read-only for security services)
   MCPLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -35,29 +37,32 @@ Resources:
                   - securityhub:Describe*
                   - inspector2:Get*
                   - inspector2:List*
-                  - accessanalyzer:List*
                   - accessanalyzer:Get*
-                  - macie2:List*
+                  - accessanalyzer:List*
                   - macie2:Get*
+                  - macie2:List*
                   - iam:Get*
                   - iam:List*
                   - cloudtrail:Get*
+                  - cloudtrail:List*
                   - config:Get*
+                  - config:List*
                   - ec2:Describe*
                   - s3:GetBucket*
                   - s3:List*
-                  - kms:Describe*
                   - kms:Get*
                   - kms:List*
+                  - kms:DescribeKey
                 Resource: '*'
 
-  # Lambda Function (MCP Server)
+  # Lambda Function (runs the FastAPI MCP server)
   MCPServerLambda:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'mcp-security-server-${Environment}'
       Handler: main.handler
       Runtime: python3.12
+      CodeUri: src/
       Role: !GetAtt MCPLambdaRole.Arn
       Timeout: 60
       MemorySize: 512
@@ -65,16 +70,36 @@ Resources:
         Variables:
           LOG_LEVEL: INFO
 
-  # API Gateway (expose MCP endpoints)
+  # API Gateway to expose the Lambda
   MCPApiGateway:
-    Type: AWS::ApiGateway::RestApi
+    Type: AWS::Serverless::Api
     Properties:
-      Name: !Sub 'MCP-Security-API-${Environment}'
-      Description: API for AWS Security MCP Server
+      StageName: prod
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: MCP Security Server API
+          version: 1.0.0
+        paths:
+          /health:
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+          /assess:
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
 
-  # Outputs
 Outputs:
   LambdaArn:
+    Description: ARN of the Lambda function
     Value: !GetAtt MCPServerLambda.Arn
   ApiEndpoint:
+    Description: URL to invoke the MCP server
     Value: !Sub 'https://${MCPApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod'
