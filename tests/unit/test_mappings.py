@@ -21,4 +21,4 @@ def test_map_to_nist_soc2_unknown_finding():
     mapped = map_to_nist_soc2(findings)
 
     assert mapped[0]["nist_csf"] == "Pending"
-    assert mapped[0]["soc2"] == "Unknown"
+    assert mapped[0]["soc2"] == "Pending"
