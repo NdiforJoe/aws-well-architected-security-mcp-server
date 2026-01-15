@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: AWS Well-Architected Security MCP Server - Lambda + API Gateway + SNS + Bedrock
+Description: AWS Well-Architected Security MCP Server - Production Security (Level 2)
 
 Parameters:
   Environment:
@@ -12,7 +12,7 @@ Parameters:
   NotificationEmail:
     Type: String
     Description: Email address to receive critical security findings
-    Default: your-email@example.com
+    Default: joewebacc@gmail.com
   
   EnableBedrock:
     Type: String
@@ -21,7 +21,56 @@ Parameters:
     Description: Enable Amazon Bedrock for AI-powered executive summaries
 
 Resources:
+  # =============================================================================
+  # SECURITY: Secrets Manager for sensitive configuration
+  # =============================================================================
+  MCPSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/config'
+      Description: Configuration secrets for MCP Security Server
+      SecretString: !Sub |
+        {
+          "notification_email": "${NotificationEmail}"
+        }
+
+  # =============================================================================
+  # SECURITY: KMS Key for Lambda environment variable encryption
+  # =============================================================================
+  LambdaKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Lambda environment variables encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow Lambda to decrypt
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'lambda.${AWS::Region}.amazonaws.com'
+
+  LambdaKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-lambda'
+      TargetKeyId: !Ref LambdaKmsKey
+
+  # =============================================================================
   # SNS Topic for Critical Findings
+  # =============================================================================
   SecurityNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -31,7 +80,9 @@ Resources:
         - Endpoint: !Ref NotificationEmail
           Protocol: email
 
-  # Enhanced IAM Role with Bedrock permissions
+  # =============================================================================
+  # SECURITY: Enhanced IAM Role with resource-scoped permissions
+  # =============================================================================
   MCPLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -45,36 +96,84 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
+        # SECURITY: Read-only security assessment permissions
         - PolicyName: ReadOnlySecurityAssessment
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # GuardDuty - scoped to detectors in this account/region
               - Effect: Allow
                 Action:
                   - guardduty:Get*
                   - guardduty:List*
+                Resource: !Sub 'arn:aws:guardduty:${AWS::Region}:${AWS::AccountId}:detector/*'
+              
+              # Security Hub - scoped to hub in this account/region
+              - Effect: Allow
+                Action:
                   - securityhub:Get*
                   - securityhub:List*
                   - securityhub:Describe*
-                  - inspector2:Get*
-                  - inspector2:List*
-                  - accessanalyzer:Get*
-                  - accessanalyzer:List*
-                  - macie2:Get*
-                  - macie2:List*
-                  - iam:Get*
-                  - iam:List*
+                Resource: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:hub/default'
+              
+              # CloudTrail - describe operations
+              - Effect: Allow
+                Action:
+                  - cloudtrail:Describe*
                   - cloudtrail:Get*
                   - cloudtrail:List*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              
+              # KMS - scoped to keys in this account/region
+              - Effect: Allow
+                Action:
+                  - kms:List*
+                  - kms:Describe*
+                  - kms:GetKeyRotationStatus
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              
+              # S3 - read bucket metadata only
+              - Effect: Allow
+                Action:
+                  - s3:GetBucket*
+                  - s3:ListAllMyBuckets
+                  - s3:GetAccountPublicAccessBlock
+                Resource: '*'
+              
+              # IAM - read-only
+              - Effect: Allow
+                Action:
+                  - iam:GetAccountSummary
+                  - iam:GetAccountPasswordPolicy
+                  - iam:ListUsers
+                  - iam:ListAccessKeys
+                  - iam:GetUser
+                Resource: '*'
+              
+              # EC2 - describe only
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeNetworkAcls
+                  - ec2:DescribeFlowLogs
+                  - ec2:DescribeInstances
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              
+              # Config - read configuration
+              - Effect: Allow
+                Action:
+                  - config:Describe*
                   - config:Get*
                   - config:List*
-                  - ec2:Describe*
-                  - s3:GetBucket*
-                  - s3:List*
-                  - kms:Get*
-                  - kms:List*
-                  - kms:DescribeKey
                 Resource: '*'
+        
+        # SECURITY: SNS publish scoped to specific topic only
         - PolicyName: SNSPublish
           PolicyDocument:
             Version: '2012-10-17'
@@ -83,6 +182,8 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref SecurityNotificationTopic
+        
+        # SECURITY: Bedrock invoke scoped to specific model
         - PolicyName: BedrockInvoke
           PolicyDocument:
             Version: '2012-10-17'
@@ -90,12 +191,73 @@ Resources:
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                Resource: 
-                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-sonnet-20241022-v2:0'
-                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
-                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0'
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-pro-v1:0'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+        
+        # SECURITY: Secrets Manager read access
+        - PolicyName: SecretsManagerRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref MCPSecrets
+        
+        # SECURITY: KMS decrypt for environment variables
+        - PolicyName: KMSDecrypt
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt LambdaKmsKey.Arn
 
-  # Lambda Function
+  # =============================================================================
+  # SECURITY: API Gateway with API Key Authentication
+  # =============================================================================
+  MCPApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      TracingEnabled: true
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: MCP Security Server usage plan with rate limiting
+          Quota:
+            Limit: 1000
+            Period: DAY
+          Throttle:
+            BurstLimit: 50
+            RateLimit: 10
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '$context.requestId $context.identity.sourceIp $context.identity.caller $context.identity.user [$context.requestTime] "$context.httpMethod $context.resourcePath $context.protocol" $context.status $context.responseLength $context.error.message'
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+  # =============================================================================
+  # SECURITY: CloudWatch Log Group for API Gateway
+  # =============================================================================
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${AWS::StackName}'
+      RetentionInDays: 30
+
+  # =============================================================================
+  # Lambda Function with enhanced security
+  # =============================================================================
   MCPServerLambda:
     Type: AWS::Serverless::Function
     Properties:
@@ -106,48 +268,35 @@ Resources:
       Role: !GetAtt MCPLambdaRole.Arn
       Timeout: 120
       MemorySize: 512
+      KmsKeyArn: !GetAtt LambdaKmsKey.Arn
       Environment:
         Variables:
           LOG_LEVEL: INFO
           SNS_TOPIC_ARN: !Ref SecurityNotificationTopic
+          SECRETS_ARN: !Ref MCPSecrets
           ENABLE_BEDROCK: !Ref EnableBedrock
+      Tracing: Active
+      Events:
+        HealthCheck:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MCPApiGateway
+            Path: /health
+            Method: GET
+            Auth:
+              ApiKeyRequired: true
+        Assessment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MCPApiGateway
+            Path: /assess
+            Method: POST
+            Auth:
+              ApiKeyRequired: true
 
-  # API Gateway with Lambda Permission
-  MCPApiGateway:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: prod
-      DefinitionBody:
-        swagger: '2.0'
-        info:
-          title: MCP Security Server API
-          version: 1.0.0
-        paths:
-          /health:
-            get:
-              x-amazon-apigateway-integration:
-                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
-                passthroughBehavior: when_no_match
-                httpMethod: POST
-                type: aws_proxy
-          /assess:
-            post:
-              x-amazon-apigateway-integration:
-                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
-                passthroughBehavior: when_no_match
-                httpMethod: POST
-                type: aws_proxy
-  
-  # Lambda permission for API Gateway
-  ApiGatewayInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref MCPServerLambda
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MCPApiGateway}/*'
-
-  # Scheduled Assessment Rule (Optional - Daily at 9 AM UTC)
+  # =============================================================================
+  # Scheduled Assessment Rule (Daily at 9 AM UTC)
+  # =============================================================================
   DailyAssessmentRule:
     Type: AWS::Events::Rule
     Properties:
@@ -162,7 +311,6 @@ Resources:
               "body": "{\"region\": \"us-east-1\", \"focus_areas\": [\"IAM\", \"Logging\", \"Network\", \"Storage\", \"Encryption\", \"ThreatDetection\"], \"send_notifications\": true}"
             }
 
-  # Permission for EventBridge to invoke Lambda
   DailyAssessmentPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -171,23 +319,80 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt DailyAssessmentRule.Arn
 
+  # =============================================================================
+  # SECURITY: CloudWatch Alarms for monitoring
+  # =============================================================================
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-high-error-rate'
+      AlarmDescription: Alert when Lambda error rate exceeds threshold
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MCPServerLambda
+      TreatMissingData: notBreaching
+
+  UnauthorizedAccessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-unauthorized-access'
+      AlarmDescription: Alert on high number of 403 errors
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref MCPApiGateway
+        - Name: Stage
+          Value: prod
+      TreatMissingData: notBreaching
+
+# =============================================================================
+# Outputs
+# =============================================================================
 Outputs:
   LambdaArn:
     Description: ARN of the Lambda function
     Value: !GetAtt MCPServerLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
   
   ApiEndpoint:
-    Description: URL to invoke the MCP server
+    Description: URL to invoke the MCP server (requires x-api-key header)
     Value: !Sub 'https://${MCPApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
   
   SNSTopicArn:
     Description: ARN of the SNS topic for notifications
     Value: !Ref SecurityNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSTopicArn'
   
-  BedrockEnabled:
-    Description: Whether Amazon Bedrock AI summaries are enabled
-    Value: !Ref EnableBedrock
+  SecretsArn:
+    Description: ARN of the Secrets Manager secret
+    Value: !Ref MCPSecrets
+    Export:
+      Name: !Sub '${AWS::StackName}-SecretsArn'
   
-  DashboardURL:
-    Description: CloudWatch Dashboard URL (create separately)
-    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=AWS-Security-MCP-Dashboard'
+  KmsKeyArn:
+    Description: ARN of the KMS key for Lambda encryption
+    Value: !GetAtt LambdaKmsKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KmsKeyArn'
+  
+  GetApiKeyCommand:
+    Description: Run this command to get your API key
+    Value: !Sub |
+      aws apigateway get-api-keys --include-values --query 'items[?name==`${AWS::StackName}-api-key`].value' --output text

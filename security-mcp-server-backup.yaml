@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Well-Architected Security MCP Server - Lambda + API Gateway + SNS + Bedrock
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+    Description: Deployment environment (dev/prod)
+  
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive critical security findings
+    Default: your-email@example.com
+  
+  EnableBedrock:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable Amazon Bedrock for AI-powered executive summaries
+
+Resources:
+  # SNS Topic for Critical Findings
+  SecurityNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'security-mcp-notifications-${Environment}'
+      DisplayName: AWS Security MCP Critical Findings
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # Enhanced IAM Role with Bedrock permissions
+  MCPLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadOnlySecurityAssessment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - guardduty:Get*
+                  - guardduty:List*
+                  - securityhub:Get*
+                  - securityhub:List*
+                  - securityhub:Describe*
+                  - inspector2:Get*
+                  - inspector2:List*
+                  - accessanalyzer:Get*
+                  - accessanalyzer:List*
+                  - macie2:Get*
+                  - macie2:List*
+                  - iam:Get*
+                  - iam:List*
+                  - cloudtrail:Get*
+                  - cloudtrail:List*
+                  - config:Get*
+                  - config:List*
+                  - ec2:Describe*
+                  - s3:GetBucket*
+                  - s3:List*
+                  - kms:Get*
+                  - kms:List*
+                  - kms:DescribeKey
+                Resource: '*'
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SecurityNotificationTopic
+        - PolicyName: BedrockInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-sonnet-20241022-v2:0'
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0'
+
+  # Lambda Function
+  MCPServerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'mcp-security-server-${Environment}'
+      Handler: lambda_handler.handler
+      Runtime: python3.12
+      CodeUri: src/
+      Role: !GetAtt MCPLambdaRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          SNS_TOPIC_ARN: !Ref SecurityNotificationTopic
+          ENABLE_BEDROCK: !Ref EnableBedrock
+
+  # API Gateway with Lambda Permission
+  MCPApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: MCP Security Server API
+          version: 1.0.0
+        paths:
+          /health:
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+          /assess:
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MCPServerLambda.Arn}/invocations'
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+  
+  # Lambda permission for API Gateway
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MCPServerLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MCPApiGateway}/*'
+
+  # Scheduled Assessment Rule (Optional - Daily at 9 AM UTC)
+  DailyAssessmentRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Run security assessment daily at 9 AM UTC
+      ScheduleExpression: cron(0 9 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MCPServerLambda.Arn
+          Id: DailySecurityAssessment
+          Input: |
+            {
+              "body": "{\"region\": \"us-east-1\", \"focus_areas\": [\"IAM\", \"Logging\", \"Network\", \"Storage\", \"Encryption\", \"ThreatDetection\"], \"send_notifications\": true}"
+            }
+
+  # Permission for EventBridge to invoke Lambda
+  DailyAssessmentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MCPServerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyAssessmentRule.Arn
+
+Outputs:
+  LambdaArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt MCPServerLambda.Arn
+  
+  ApiEndpoint:
+    Description: URL to invoke the MCP server
+    Value: !Sub 'https://${MCPApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  
+  SNSTopicArn:
+    Description: ARN of the SNS topic for notifications
+    Value: !Ref SecurityNotificationTopic
+  
+  BedrockEnabled:
+    Description: Whether Amazon Bedrock AI summaries are enabled
+    Value: !Ref EnableBedrock
+  
+  DashboardURL:
+    Description: CloudWatch Dashboard URL (create separately)
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=AWS-Security-MCP-Dashboard'
